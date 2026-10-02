@@ -31,8 +31,9 @@ All data lives in Notion, reachable from any Notion client independent of this b
 | Database | Purpose |
 |---|---|
 | **Task Inbox** | The actual tasks (Name, Category, Status, Due Date, Raw Text, Clean Text, ChatId, auto `ID`) |
-| **Bot Users** | Web-login credentials per Telegram chat id (ChatId, PasswordHash, Salt, DisplayName) |
+| **Bot Users** | Web-login credentials per Telegram chat id (ChatId, PasswordHash, Salt, DisplayName, DigestEnabled, DigestHour) |
 | **Bot Error Log** | Every caught error across the whole flow, for debugging without a live session |
+| **Bot Feedback** | Free-text feedback users send the creator (ChatId, DisplayName, Text) — kept separate from Task Inbox |
 
 The Worker talks to Notion via a **Notion internal integration** named `TaskBotWorker`. Any new
 Notion database this project needs must be manually shared with that integration from Notion's UI
@@ -48,6 +49,7 @@ Set via `wrangler secret put <NAME>` from this folder (never stored in a file):
 - `NOTION_DATABASE_ID` — Task Inbox database id
 - `NOTION_ERROR_DB_ID` — Bot Error Log database id
 - `NOTION_USERS_DB_ID` — Bot Users database id
+- `NOTION_FEEDBACK_DB_ID` — Bot Feedback database id
 - `WEB_SESSION_SECRET` — random secret for signing web session cookies
 
 ## Deploying
@@ -93,6 +95,12 @@ curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://task-capture-bo
 - "📅 فردا چی‌کارم؟" keyboard button — everything due today/tomorrow, all categories.
 - `/webapp` — show the web board URL + credentials (or how to reset them).
 - `/resetpassword` — issue a new web-board password (includes the web board URL).
+- "💬 فیدبک" keyboard button — reply with free text; it's saved straight to the **Bot Feedback**
+  database (not the Task Inbox), so it never shows up mixed in with the user's own tasks.
+- "⏰ خلاصه روزانه" keyboard button — off by default; pick 8, 9 or 10 AM (Tehran time) and a
+  scheduled Worker (`scheduled` export, cron in `wrangler.toml`) sends a short daily summary of
+  that day's open items at the chosen hour. Toggling it on auto-creates the user's Bot Users row
+  (with web credentials) if `/start` was never run, so it never silently no-ops.
 
 ### Per-item actions (inline buttons on every captured item)
 

@@ -29,7 +29,10 @@ export const STATUS_EMOJI = { todo: "🆕", reviewing: "🔍", in_progress: "�
 export const DEFAULT_STATUS = "todo";
 const WEEKDAY_FA = ["یکشنبه", "دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه"];
 const PERSISTENT_KEYBOARD = {
-  keyboard: [[{ text: "📋 لیست" }, { text: "📅 فردا چی‌کارم؟" }]],
+  keyboard: [
+    [{ text: "📋 لیست" }, { text: "📅 فردا چی‌کارم؟" }],
+    [{ text: "⏰ خلاصه روزانه" }, { text: "💬 فیدبک" }],
+  ],
   resize_keyboard: true,
   is_persistent: true,
 };
@@ -112,6 +115,12 @@ export default {
 
     return new Response("ok", { status: 200 });
   },
+
+  // Fires on the cron schedule in wrangler.toml (fixed UTC times matching
+  // 8/9/10 AM Tehran, since Iran no longer observes DST).
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runDailyDigest(event, env));
+  },
 };
 
 async function handleMessage(message, env) {
@@ -129,6 +138,12 @@ async function handleMessage(message, env) {
   const editTextRef = message.reply_to_message?.text?.match(/#edittext:([a-f0-9]{32})/);
   if (editTextRef && message.text) {
     await handleEditTextReply(chatId, editTextRef[1], message.text, env);
+    return;
+  }
+
+  // A reply to our "feedback" prompt carries a hidden #feedback tag.
+  if (message.reply_to_message?.text?.includes("#feedback") && message.text) {
+    await handleFeedbackReply(chatId, message, env);
     return;
   }
 
@@ -204,6 +219,28 @@ async function handleMessage(message, env) {
           text: `پنل وب فعال شد ✅\nآدرس: ${WEBAPP_BASE_URL}\nشناسه ورود: <code>${chatId}</code>\nرمز: <code>${password}</code>\n\nاین رمز رو یه جا نگه دار، دیگه نشونش نمی‌دم.`,
         });
       }
+      return;
+    }
+    if (message.text === "💬 فیدبک") {
+      await telegramCall(env, "sendMessage", {
+        chat_id: chatId,
+        text: "فیدبکت رو بنویس — مستقیم برای سازنده‌ی بات می‌ره، جای تسک‌هات ذخیره نمی‌شه.\n#feedback",
+        reply_markup: { force_reply: true, input_field_placeholder: "فیدبکتو بنویس..." },
+      });
+      return;
+    }
+    if (message.text === "⏰ خلاصه روزانه") {
+      const user = await notionFindUser(chatId, env);
+      const enabled = !!user?.properties?.DigestEnabled?.checkbox;
+      const hour = user?.properties?.DigestHour?.number || null;
+      const statusText = enabled
+        ? `⏰ خلاصه روزانه فعاله — هر روز ساعت ${hour} صبح (به‌وقت ایران) خلاصه‌ی کارای اون روزتو برات می‌فرستم.`
+        : "⏰ خلاصه روزانه الان خاموشه. یه ساعت انتخاب کن تا هر روز صبح خلاصه‌ی کارای اون روزتو بفرستم:";
+      await telegramCall(env, "sendMessage", {
+        chat_id: chatId,
+        text: statusText,
+        reply_markup: buildDigestKeyboard(enabled, hour),
+      });
       return;
     }
     if (message.text === "/resetpassword") {
@@ -351,6 +388,19 @@ async function handleEditTextReply(chatId, pageIdNoDash, newText, env) {
     text: `📝 متن #${shortId} به‌روزرسانی شد:\n\n${trimmed}`,
     reply_markup: buildKeyboard(pageIdNoDash),
   });
+}
+
+async function handleFeedbackReply(chatId, message, env) {
+  const text = (message.text || "").trim();
+  if (!text) return;
+  const displayName = message.from?.first_name || message.from?.username || null;
+  try {
+    await notionCreateFeedback(chatId, displayName, text, env);
+    await telegramCall(env, "sendMessage", { chat_id: chatId, text: "🙏 ممنون، فیدبکت ثبت شد." });
+  } catch (err) {
+    await logError("handleFeedbackReply", err, env, chatId);
+    await telegramCall(env, "sendMessage", { chat_id: chatId, text: "⚠️ نشد ثبتش کنم، یه بار دیگه امتحان کن." });
+  }
 }
 
 async function handleCallback(cq, env) {
@@ -521,6 +571,23 @@ async function handleCallback(cq, env) {
       text: formatListHeader(category, extra, items.length),
     });
     await sendItemMessages(env, chatId, items);
+  } else if (action === "digeston") {
+    const hour = Number(rawId);
+    await notionSetDigestSettings(chatId, true, hour, env);
+    await editOrSend(env, {
+      chat_id: chatId,
+      message_id: messageId,
+      text: `⏰ خلاصه روزانه فعال شد — هر روز ساعت ${hour} صبح (به‌وقت ایران) خلاصه‌ی کارای اون روزتو برات می‌فرستم.`,
+      reply_markup: buildDigestKeyboard(true, hour),
+    });
+  } else if (action === "digestoff") {
+    await notionSetDigestSettings(chatId, false, null, env);
+    await editOrSend(env, {
+      chat_id: chatId,
+      message_id: messageId,
+      text: "🔕 خلاصه روزانه خاموش شد.",
+      reply_markup: buildDigestKeyboard(false, null),
+    });
   }
   } catch (err) {
     await logError(`handleCallback action=${action}`, err, env, chatId);
@@ -645,6 +712,19 @@ function buildDateKeyboard(pageIdNoDash) {
     { text: "🚫 پاک کردن تاریخ", callback_data: `cleardate:${pageIdNoDash}` },
   ]);
   rows.push([{ text: "⬅️ برگشت", callback_data: `back:${pageIdNoDash}` }]);
+  return { inline_keyboard: rows };
+}
+
+function buildDigestKeyboard(enabled, currentHour) {
+  const hours = [8, 9, 10];
+  const row = hours.map((h) => ({
+    text: `${enabled && currentHour === h ? "✅ " : ""}ساعت ${h} صبح`,
+    callback_data: `digeston:${h}`,
+  }));
+  const rows = [row];
+  if (enabled) {
+    rows.push([{ text: "🔕 خاموش کردن", callback_data: "digestoff" }]);
+  }
   return { inline_keyboard: rows };
 }
 
@@ -1198,4 +1278,116 @@ export async function notionQueryByCategoryAndDate(category, rangeCode, chatId, 
     const shortId = formatShortId(page);
     return { id: page.id, name, cleanText, rawText, status, category: categoryName, dueDate, shortId };
   });
+}
+
+// ---------- Feedback (separate database, never mixed with the task inbox) ----------
+
+async function notionCreateFeedback(chatId, displayName, text, env) {
+  const res = await fetch("https://api.notion.com/v1/pages", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.NOTION_SECRET}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    },
+    body: JSON.stringify({
+      parent: { database_id: env.NOTION_FEEDBACK_DB_ID },
+      properties: {
+        Name: { title: [{ text: { content: text.slice(0, 100) } }] },
+        ChatId: { number: chatId },
+        ...(displayName ? { DisplayName: { rich_text: [{ text: { content: displayName } }] } } : {}),
+        Text: { rich_text: [{ text: { content: text.slice(0, 2000) } }] },
+      },
+    }),
+  });
+  const json = await res.json();
+  if (!res.ok) {
+    await logError("notionCreateFeedback", new Error(JSON.stringify(json)), env, chatId);
+    throw new Error("notion create failed");
+  }
+  return json;
+}
+
+// ---------- Daily digest (per-user opt-in summary, sent by the cron trigger) ----------
+
+async function notionSetDigestSettings(chatId, enabled, hour, env) {
+  let user = await notionFindUser(chatId, env);
+  if (!user) {
+    // Toggling the digest before ever running /start or /webapp: create the
+    // Bot Users row now (same credentials flow /webapp uses) so the setting
+    // actually persists instead of silently doing nothing.
+    const password = generate8DigitPassword();
+    const salt = randomSalt();
+    const hash = await hashPassword(password, salt);
+    await notionUpsertUser(chatId, hash, salt, env, null);
+    await telegramCall(env, "sendMessage", {
+      chat_id: chatId,
+      parse_mode: "HTML",
+      text: `راستی، یه برد وب هم برات ساختم: ${WEBAPP_BASE_URL}\nشناسه ورود: <code>${chatId}</code>\nرمز: <code>${password}</code>`,
+    });
+    user = await notionFindUser(chatId, env);
+    if (!user) return;
+  }
+  await notionPatch(
+    user.id,
+    { properties: { DigestEnabled: { checkbox: enabled }, DigestHour: { number: hour } } },
+    `notionSetDigestSettings(${chatId})`,
+    env
+  );
+}
+
+async function notionQueryDigestUsers(hour, env) {
+  const res = await fetch(`https://api.notion.com/v1/databases/${env.NOTION_USERS_DB_ID}/query`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.NOTION_SECRET}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    },
+    body: JSON.stringify({
+      filter: {
+        and: [
+          { property: "DigestEnabled", checkbox: { equals: true } },
+          { property: "DigestHour", number: { equals: hour } },
+        ],
+      },
+      page_size: 100,
+    }),
+  });
+  const json = await res.json();
+  if (!res.ok) {
+    await logError("notionQueryDigestUsers", new Error(JSON.stringify(json)), env);
+    return [];
+  }
+  return json.results;
+}
+
+function formatDigestText(items) {
+  if (items.length === 0) {
+    return "☀️ صبح بخیر! امروز هیچ کار زمان‌داری نداری — یه روز آرومه 🙂";
+  }
+  const lines = items.map((it) => `• ${CATEGORY_EMOJI[it.category] || "📌"} ${it.name}`);
+  return `☀️ خلاصه امروزت (${items.length} مورد):\n${lines.join("\n")}`;
+}
+
+// wrangler.toml's cron trigger fires at fixed UTC times picked to match
+// 8/9/10 AM Tehran (Iran dropped DST, so the UTC+3:30 offset never shifts).
+const DIGEST_CRON_HOUR = { "30 4 * * *": 8, "30 5 * * *": 9, "30 6 * * *": 10 };
+
+async function runDailyDigest(event, env) {
+  const hour = DIGEST_CRON_HOUR[event.cron];
+  if (!hour) return;
+  const users = await notionQueryDigestUsers(hour, env);
+  for (const user of users) {
+    const chatId = user.properties?.ChatId?.number;
+    if (!chatId) continue;
+    try {
+      const items = (await notionQueryByCategoryAndDate(null, "T", chatId, env)).filter(
+        (it) => it.status !== "done" && it.status !== "skipped"
+      );
+      await telegramCall(env, "sendMessage", { chat_id: chatId, text: formatDigestText(items) });
+    } catch (err) {
+      await logError(`runDailyDigest chatId=${chatId}`, err, env, chatId);
+    }
+  }
 }

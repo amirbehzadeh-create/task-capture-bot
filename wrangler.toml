@@ -1,3 +1,8 @@
 name = "task-capture-bot"
 main = "worker.js"
 compatibility_date = "2025-01-01"
+
+# Fixed UTC times matching 8:00 / 9:00 / 10:00 AM Tehran (Iran no longer
+# observes DST, so the UTC+3:30 offset is constant year-round).
+[triggers]
+crons = ["30 4 * * *", "30 5 * * *", "30 6 * * *"]
