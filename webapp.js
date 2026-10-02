@@ -20,6 +20,9 @@ import {
   notionUpdateStatus,
   notionUpdateDueDate,
   notionQueryByCategoryAndDate,
+  classifyWithGemini,
+  notionCreatePageFull,
+  formatShortId,
 } from "./worker.js";
 
 // ---------- crypto helpers ----------
@@ -127,7 +130,7 @@ export async function notionFindUser(chatId, env) {
   return json.results[0] || null;
 }
 
-export async function notionUpsertUser(chatId, passwordHash, salt, env) {
+export async function notionUpsertUser(chatId, passwordHash, salt, env, displayName) {
   const existing = await notionFindUser(chatId, env);
   const properties = {
     Name: { title: [{ text: { content: String(chatId) } }] },
@@ -135,6 +138,9 @@ export async function notionUpsertUser(chatId, passwordHash, salt, env) {
     PasswordHash: { rich_text: [{ text: { content: passwordHash } }] },
     Salt: { rich_text: [{ text: { content: salt } }] },
   };
+  if (displayName) {
+    properties.DisplayName = { rich_text: [{ text: { content: displayName } }] };
+  }
   const headers = {
     Authorization: `Bearer ${env.NOTION_SECRET}`,
     "Content-Type": "application/json",
@@ -149,6 +155,22 @@ export async function notionUpsertUser(chatId, passwordHash, salt, env) {
       body: JSON.stringify({ parent: { database_id: env.NOTION_USERS_DB_ID }, properties }),
     });
   }
+}
+
+// Lightweight refresh of just the human-readable name, independent of the password flow.
+export async function notionUpdateDisplayName(chatId, displayName, env) {
+  if (!displayName) return;
+  const existing = await notionFindUser(chatId, env);
+  if (!existing) return;
+  await fetch(`https://api.notion.com/v1/pages/${existing.id}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${env.NOTION_SECRET}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    },
+    body: JSON.stringify({ properties: { DisplayName: { rich_text: [{ text: { content: displayName } }] } } }),
+  });
 }
 
 // ---------- API ----------
@@ -193,7 +215,9 @@ export async function handleApi(request, url, env) {
 
   if (path === "/api/me" && request.method === "GET") {
     if (!chatId) return json({ error: "unauthorized" }, 401);
-    return json({ chatId });
+    const user = await notionFindUser(chatId, env);
+    const displayName = user?.properties?.DisplayName?.rich_text?.[0]?.plain_text || null;
+    return json({ chatId, displayName });
   }
 
   if (!chatId) return json({ error: "unauthorized" }, 401);
@@ -218,6 +242,40 @@ export async function handleApi(request, url, env) {
       rawText: it.rawText,
     }));
     return json({ tasks });
+  }
+
+  if (path === "/api/tasks" && request.method === "POST") {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "bad request" }, 400);
+    }
+    let source;
+    if (body.audioBase64) {
+      source = { kind: "audio", base64: body.audioBase64, mimeType: body.mimeType || "audio/webm" };
+    } else if (body.text && body.text.trim()) {
+      source = { kind: "text", text: body.text.trim() };
+    } else {
+      return json({ error: "متن یا صدایی ارسال نشد" }, 400);
+    }
+
+    const items = await classifyWithGemini(source, env);
+    const created = [];
+    for (const item of items) {
+      const page = await notionCreatePageFull(chatId, item, env);
+      created.push({
+        id: page.id.replace(/-/g, ""),
+        shortId: formatShortId(page),
+        name: item.name,
+        category: item.category,
+        status: DEFAULT_STATUS,
+        dueDate: item.due_date,
+        cleanText: item.clean_text,
+        rawText: item.raw_text,
+      });
+    }
+    return json({ tasks: created });
   }
 
   const taskMatch = path.match(/^\/api\/tasks\/([a-f0-9]{32})(\/restore)?$/);
@@ -283,6 +341,8 @@ export function renderAppHtml() {
     --text-muted: #6b7280;
     --accent: #4f46e5;
     --accent-dark: #4338ca;
+    --success: #16a34a;
+    --success-dark: #15803d;
     --danger: #e11d48;
     --radius: 12px;
   }
@@ -318,6 +378,12 @@ export function renderAppHtml() {
   .btn-ghost { background: transparent; color: var(--text-muted); }
   .btn-ghost:hover { background: #eef0f6; }
   .btn-danger { background: var(--danger); color: #fff; }
+  .btn-success {
+    background: var(--success); color: #fff; font-weight: 600; padding: 10px 18px 10px 16px;
+    border-radius: 999px; box-shadow: 0 2px 8px rgba(22,163,74,0.35);
+  }
+  .btn-success:hover { background: var(--success-dark); box-shadow: 0 4px 12px rgba(22,163,74,0.45); transform: translateY(-1px); }
+  .btn-success svg { width: 18px; height: 18px; flex-shrink: 0; }
   .error-msg { color: var(--danger); font-size: 13px; margin-top: 10px; min-height: 16px; }
 
   /* ---- Top bar ---- */
@@ -393,11 +459,36 @@ export function renderAppHtml() {
 
   <div id="board-wrap" class="hidden">
     <div class="topbar">
-      <h1>📋 تسک‌های من</h1>
-      <button class="btn btn-ghost" id="logout-btn">خروج</button>
+      <h1>📋 تسک‌های <span id="greet-name">من</span></h1>
+      <div style="display:flex; gap:8px;">
+        <button class="btn btn-success" id="new-task-btn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          تسک جدید
+        </button>
+        <button class="btn btn-ghost" id="logout-btn">خروج</button>
+      </div>
     </div>
     <div class="filters" id="filters"></div>
     <div class="board" id="board"></div>
+  </div>
+</div>
+
+<div class="modal-overlay hidden" id="new-task-overlay">
+  <div class="modal">
+    <h2>➕ تسک جدید</h2>
+    <div class="field">
+      <label>متن</label>
+      <textarea id="nt-text" rows="4" placeholder="مثلاً: فردا باید با مسعود تماس بگیرم..."></textarea>
+    </div>
+    <div class="field" style="text-align:center;">
+      <button class="btn btn-ghost" id="nt-record">🎙 ضبط صدا</button>
+      <div id="nt-record-status" style="font-size:12px; color:var(--text-muted); margin-top:6px;"></div>
+    </div>
+    <div class="error-msg" id="nt-error"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="nt-cancel">انصراف</button>
+      <button class="btn btn-primary" id="nt-submit">ثبت</button>
+    </div>
   </div>
 </div>
 
@@ -464,6 +555,8 @@ async function init() {
   try {
     const res = await fetch("/api/me");
     if (!res.ok) { showLogin(); return; }
+    const me = await res.json();
+    document.getElementById("greet-name").textContent = me.displayName || "من";
   } catch { showLogin(); return; }
   await loadMeta();
   await loadTasks();
@@ -537,6 +630,14 @@ function addDaysIso(iso, n) {
   return d.toISOString().slice(0, 10);
 }
 
+// Iranian week: Saturday..Friday (not the Western Monday-start week).
+function iranianWeekEnd(today) {
+  const dow = new Date(today + "T00:00:00Z").getUTCDay(); // 0=Sun..6=Sat
+  const daysSinceSaturday = (dow - 6 + 7) % 7;
+  const thisStart = addDaysIso(today, -daysSinceSaturday);
+  return addDaysIso(thisStart, 6);
+}
+
 function passesDateFilter(task) {
   if (activeDateFilter === "A") return true;
   if (activeDateFilter === "NONE") return !task.dueDate;
@@ -544,7 +645,7 @@ function passesDateFilter(task) {
   const today = todayIso();
   if (activeDateFilter === "T") return task.dueDate === today;
   if (activeDateFilter === "M") return task.dueDate === addDaysIso(today, 1);
-  if (activeDateFilter === "W") return task.dueDate >= today && task.dueDate <= addDaysIso(today, 6);
+  if (activeDateFilter === "W") return task.dueDate >= today && task.dueDate <= iranianWeekEnd(today);
   return true;
 }
 
@@ -695,6 +796,97 @@ document.getElementById("m-delete").addEventListener("click", async () => {
   await api("/api/tasks/" + editingTaskId, { method: "DELETE" });
   closeModal();
   await loadTasks();
+});
+
+// ---- New task (text or voice) ----
+let mediaRecorder = null;
+let recordedChunks = [];
+let recordedBlob = null;
+
+function openNewTaskModal() {
+  document.getElementById("nt-text").value = "";
+  document.getElementById("nt-error").textContent = "";
+  document.getElementById("nt-record-status").textContent = "";
+  recordedBlob = null;
+  document.getElementById("nt-record").textContent = "🎙 ضبط صدا";
+  document.getElementById("new-task-overlay").classList.remove("hidden");
+}
+function closeNewTaskModal() {
+  if (mediaRecorder && mediaRecorder.state === "recording") mediaRecorder.stop();
+  document.getElementById("new-task-overlay").classList.add("hidden");
+}
+
+document.getElementById("new-task-btn").addEventListener("click", openNewTaskModal);
+document.getElementById("nt-cancel").addEventListener("click", closeNewTaskModal);
+document.getElementById("new-task-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "new-task-overlay") closeNewTaskModal();
+});
+
+document.getElementById("nt-record").addEventListener("click", async () => {
+  const btn = document.getElementById("nt-record");
+  const statusEl = document.getElementById("nt-record-status");
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      recordedBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "audio/webm" });
+      stream.getTracks().forEach((t) => t.stop());
+      btn.textContent = "🎙 ضبط صدا";
+      statusEl.textContent = "✅ صدا ضبط شد (" + Math.round(recordedBlob.size / 1024) + " کیلوبایت)";
+    };
+    mediaRecorder.start();
+    btn.textContent = "⏹ توقف ضبط";
+    statusEl.textContent = "در حال ضبط...";
+  } catch (err) {
+    statusEl.textContent = "دسترسی به میکروفون داده نشد.";
+  }
+});
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+document.getElementById("nt-submit").addEventListener("click", async () => {
+  const errEl = document.getElementById("nt-error");
+  errEl.textContent = "";
+  const text = document.getElementById("nt-text").value.trim();
+  const submitBtn = document.getElementById("nt-submit");
+
+  if (!text && !recordedBlob) { errEl.textContent = "یا متن بنویس یا صدا ضبط کن."; return; }
+
+  submitBtn.disabled = true;
+  submitBtn.textContent = "در حال پردازش...";
+  try {
+    let body;
+    if (recordedBlob) {
+      const base64 = await blobToBase64(recordedBlob);
+      body = { audioBase64: base64, mimeType: recordedBlob.type };
+    } else {
+      body = { text };
+    }
+    const res = await api("/api/tasks", { method: "POST", body: JSON.stringify(body) });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      errEl.textContent = data.error || "ثبت نشد، دوباره امتحان کن.";
+      return;
+    }
+    closeNewTaskModal();
+    await loadTasks();
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "ثبت";
+  }
 });
 
 init();

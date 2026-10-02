@@ -11,7 +11,7 @@
  *   WEB_SESSION_SECRET   (random secret for signing web session cookies)
  */
 
-import { handleApi, renderAppHtml, notionFindUser, notionUpsertUser, hashPassword, randomSalt, generate8DigitPassword } from "./webapp.js";
+import { handleApi, renderAppHtml, notionFindUser, notionUpsertUser, notionUpdateDisplayName, hashPassword, randomSalt, generate8DigitPassword } from "./webapp.js";
 
 const WEBAPP_BASE_URL = "https://task-capture-bot.mytaskcapture.workers.dev";
 const TZ = "Asia/Tehran";
@@ -131,23 +131,27 @@ async function handleMessage(message, env) {
   if (message.voice || message.audio) {
     isVoice = true;
   } else if (message.text) {
+    const displayName = message.from?.first_name || message.from?.username || null;
+
     if (message.text.startsWith("/start")) {
       let credLine;
       const existingUser = await notionFindUser(chatId, env);
       if (existingUser) {
-        credLine = `🖥 برد وب: ${WEBAPP_BASE_URL}\nشناسه ورود: ${chatId}\nرمزت رو قبلاً فرستادم؛ یادت رفته؟ بزن /resetpassword`;
+        await notionUpdateDisplayName(chatId, displayName, env);
+        credLine = `🖥 برد وب: ${WEBAPP_BASE_URL}\nشناسه ورود: <code>${chatId}</code>\nرمزت رو قبلاً فرستادم؛ یادت رفته؟ بزن /resetpassword`;
       } else {
         const password = generate8DigitPassword();
         const salt = randomSalt();
         const hash = await hashPassword(password, salt);
-        await notionUpsertUser(chatId, hash, salt, env);
-        credLine = `🖥 یه برد وب هم برات ساختم که از دسکتاپ هم بتونی کاراتو جابه‌جا کنی:\nآدرس: ${WEBAPP_BASE_URL}\nشناسه ورود: ${chatId}\nرمز: ${password}\n(این رمز رو یه جا نگه دار، دیگه نشونش نمی‌دم. هر وقت خواستی عوضش کنی، بزن /resetpassword)`;
+        await notionUpsertUser(chatId, hash, salt, env, displayName);
+        credLine = `🖥 یه برد وب هم برات ساختم که از دسکتاپ هم بتونی کاراتو جابه‌جا کنی:\nآدرس: ${WEBAPP_BASE_URL}\nشناسه ورود: <code>${chatId}</code>\nرمز: <code>${password}</code>\n(این رمز رو یه جا نگه دار، دیگه نشونش نمی‌دم. هر وقت خواستی عوضش کنی، بزن /resetpassword)`;
       }
 
       await telegramCall(env, "sendMessage", {
         chat_id: chatId,
+        parse_mode: "HTML",
         text:
-          "سلام! 👋 با این بات می‌تونی:\n\n" +
+          `سلام${displayName ? " " + displayName : ""}! 👋 با این بات می‌تونی:\n\n` +
           "🎙 هر وویس یا متنی بفرستی، خودم تبدیل، دسته‌بندی، و (اگه تاریخی توش بود) زمان‌دارش می‌کنم.\n" +
           "📋 با دکمه‌ی «لیست» یا «فردا چی‌کارم؟» کارهاتو ببینی.\n" +
           "✏️ رو هر آیتم دسته/وضعیت/تاریخشو عوض کنی یا حذفش کنی (با امکان واگرد).\n\n" +
@@ -176,18 +180,21 @@ async function handleMessage(message, env) {
     if (message.text === "/webapp") {
       const existing = await notionFindUser(chatId, env);
       if (existing) {
+        await notionUpdateDisplayName(chatId, displayName, env);
         await telegramCall(env, "sendMessage", {
           chat_id: chatId,
-          text: `پنل وب: ${WEBAPP_BASE_URL}\nشناسه ورود: ${chatId}\n\nرمزت رو قبلاً فرستادم؛ اگه یادت رفته /resetpassword رو بزن تا یه رمز جدید بسازم.`,
+          parse_mode: "HTML",
+          text: `پنل وب: ${WEBAPP_BASE_URL}\nشناسه ورود: <code>${chatId}</code>\n\nرمزت رو قبلاً فرستادم؛ اگه یادت رفته /resetpassword رو بزن تا یه رمز جدید بسازم.`,
         });
       } else {
         const password = generate8DigitPassword();
         const salt = randomSalt();
         const hash = await hashPassword(password, salt);
-        await notionUpsertUser(chatId, hash, salt, env);
+        await notionUpsertUser(chatId, hash, salt, env, displayName);
         await telegramCall(env, "sendMessage", {
           chat_id: chatId,
-          text: `پنل وب فعال شد ✅\nآدرس: ${WEBAPP_BASE_URL}\nشناسه ورود: ${chatId}\nرمز: ${password}\n\nاین رمز رو یه جا نگه دار، دیگه نشونش نمی‌دم.`,
+          parse_mode: "HTML",
+          text: `پنل وب فعال شد ✅\nآدرس: ${WEBAPP_BASE_URL}\nشناسه ورود: <code>${chatId}</code>\nرمز: <code>${password}</code>\n\nاین رمز رو یه جا نگه دار، دیگه نشونش نمی‌دم.`,
         });
       }
       return;
@@ -196,10 +203,11 @@ async function handleMessage(message, env) {
       const password = generate8DigitPassword();
       const salt = randomSalt();
       const hash = await hashPassword(password, salt);
-      await notionUpsertUser(chatId, hash, salt, env);
+      await notionUpsertUser(chatId, hash, salt, env, displayName);
       await telegramCall(env, "sendMessage", {
         chat_id: chatId,
-        text: `رمز جدید ساخته شد ✅\nشناسه ورود: ${chatId}\nرمز: ${password}`,
+        parse_mode: "HTML",
+        text: `رمز جدید ساخته شد ✅\nآدرس: ${WEBAPP_BASE_URL}\nشناسه ورود: <code>${chatId}</code>\nرمز: <code>${password}</code>`,
       });
       return;
     }
@@ -239,13 +247,32 @@ async function handleMessage(message, env) {
       transcriptSource = { kind: "text", text: message.text };
     }
 
-    const items = await classifyWithGemini(transcriptSource, env);
+    const MAX_ATTEMPTS = 3;
+    let items;
+    let lastErr;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        items = await classifyWithGemini(transcriptSource, env);
+        break;
+      } catch (err) {
+        lastErr = err;
+        await logError(`classifyWithGemini attempt ${attempt}/${MAX_ATTEMPTS} (item #${shortId})`, err, env, chatId);
+        if (attempt < MAX_ATTEMPTS && ackMessageId) {
+          await editOrSend(env, {
+            chat_id: chatId,
+            message_id: ackMessageId,
+            text: `🔁 اولین تلاش جواب نداد، دوباره امتحان می‌کنم (${attempt + 1} از ${MAX_ATTEMPTS})...`,
+          });
+        }
+      }
+    }
+    if (!items) throw lastErr;
     const [first, ...rest] = items;
 
     await notionUpdatePageContent(page.id, first, env);
     const confirmation = formatConfirmationText(first, shortId);
     if (ackMessageId) {
-      await telegramCall(env, "editMessageText", {
+      await editOrSend(env, {
         chat_id: chatId,
         message_id: ackMessageId,
         text: confirmation,
@@ -272,9 +299,10 @@ async function handleMessage(message, env) {
     }
   } catch (err) {
     await logError(`handleMessage processing (item #${shortId})`, err, env, chatId);
-    const failText = `⚠️ #${shortId} رو نتونستم پردازش کنم. دوباره امتحان کن یا بعداً بگو بررسی کنم.`;
+    await notionSoftDelete(page.id, env); // don't leave a junk "⏳ در حال پردازش..." row behind
+    const failText = `⚠️ متأسفیم، بعد از چند بار تلاش هم نشد پردازشش کنیم. #${shortId} پاک شد — لطفاً از اول دوباره بفرست.`;
     if (ackMessageId) {
-      await telegramCall(env, "editMessageText", { chat_id: chatId, message_id: ackMessageId, text: failText });
+      await editOrSend(env, { chat_id: chatId, message_id: ackMessageId, text: failText });
     } else {
       await telegramCall(env, "sendMessage", { chat_id: chatId, text: failText });
     }
@@ -332,7 +360,7 @@ async function handleCallback(cq, env) {
     const oldPage = await notionGetPage(pageId, env);
     const oldStatus = oldPage.properties.Status?.select?.name || DEFAULT_STATUS;
     await notionSoftDelete(pageId, env);
-    await telegramCall(env, "editMessageText", {
+    await editOrSend(env, {
       chat_id: chatId,
       message_id: messageId,
       text: cq.message.text + "\n\n🗑 حذف شد.",
@@ -341,7 +369,7 @@ async function handleCallback(cq, env) {
   } else if (action === "undodel") {
     const restoredStatus = CODE_STATUS[extra] || DEFAULT_STATUS;
     await notionUpdateStatus(pageId, restoredStatus, env);
-    await telegramCall(env, "editMessageText", {
+    await editOrSend(env, {
       chat_id: chatId,
       message_id: messageId,
       text: cq.message.text + "\n\n↩️ بازگردانده شد.",
@@ -367,7 +395,7 @@ async function handleCallback(cq, env) {
         },
       ]);
     }
-    await telegramCall(env, "editMessageText", {
+    await editOrSend(env, {
       chat_id: chatId,
       message_id: messageId,
       text: cq.message.text + `\n\n✏️ دسته تغییر کرد به: ${CATEGORY_EMOJI[category]} ${CATEGORY_LABEL_FA[category]}`,
@@ -389,7 +417,7 @@ async function handleCallback(cq, env) {
     } else if (!oldDate) {
       kb.inline_keyboard.unshift([{ text: "↩️ واگرد (بدون تاریخ)", callback_data: `cleardate:${rawId}` }]);
     }
-    await telegramCall(env, "editMessageText", {
+    await editOrSend(env, {
       chat_id: chatId,
       message_id: messageId,
       text: cq.message.text + `\n\n📅 تاریخ ثبت شد: ${formatPersianDate(extra)}`,
@@ -403,7 +431,7 @@ async function handleCallback(cq, env) {
     if (oldDate) {
       kb.inline_keyboard.unshift([{ text: `↩️ واگرد به ${formatPersianDate(oldDate)}`, callback_data: `setdate:${rawId}:${oldDate}` }]);
     }
-    await telegramCall(env, "editMessageText", {
+    await editOrSend(env, {
       chat_id: chatId,
       message_id: messageId,
       text: cq.message.text + "\n\n📅 تاریخ پاک شد.",
@@ -434,14 +462,14 @@ async function handleCallback(cq, env) {
         },
       ]);
     }
-    await telegramCall(env, "editMessageText", {
+    await editOrSend(env, {
       chat_id: chatId,
       message_id: messageId,
       text: cq.message.text + `\n\n🔄 وضعیت تغییر کرد به: ${STATUS_EMOJI[status]} ${STATUS_LABEL_FA[status]}`,
       reply_markup: kb,
     });
   } else if (action === "listcat") {
-    await telegramCall(env, "editMessageText", {
+    await editOrSend(env, {
       chat_id: chatId,
       message_id: messageId,
       text: "چه بازه‌ای؟",
@@ -450,7 +478,7 @@ async function handleCallback(cq, env) {
   } else if (action === "listdate") {
     const category = CODE_CATEGORY[rawId] || null; // null means "all"
     const items = await notionQueryByCategoryAndDate(category, extra, chatId, env);
-    await telegramCall(env, "editMessageText", {
+    await editOrSend(env, {
       chat_id: chatId,
       message_id: messageId,
       text: formatListHeader(category, extra, items.length),
@@ -620,6 +648,18 @@ export function addDays(isoDate, n) {
   return d.toISOString().slice(0, 10);
 }
 
+// Iranian week: starts Saturday, ends Friday (not the Western Monday-start week).
+// Returns this week's and next week's Sat..Fri bounds given today's ISO date.
+export function iranianWeekBounds(isoDate) {
+  const dow = new Date(isoDate + "T00:00:00Z").getUTCDay(); // 0=Sun..6=Sat
+  const daysSinceSaturday = (dow - 6 + 7) % 7;
+  const thisStart = addDays(isoDate, -daysSinceSaturday);
+  const thisEnd = addDays(thisStart, 6);
+  const nextStart = addDays(thisStart, 7);
+  const nextEnd = addDays(thisStart, 13);
+  return { thisStart, thisEnd, nextStart, nextEnd };
+}
+
 // ---------- Gregorian -> Jalali (Persian/Shamsi) conversion ----------
 // Standard jalaali-js algorithm (public domain / MIT-style, widely reused).
 
@@ -718,6 +758,18 @@ async function telegramCall(env, method, payload) {
   return json;
 }
 
+// Telegram occasionally refuses to edit a message ("message can't be edited") for
+// reasons outside our control. Rather than silently stranding the user on a stale
+// "در حال پردازش..." message, fall back to sending a brand-new message instead.
+async function editOrSend(env, payload) {
+  const res = await telegramCall(env, "editMessageText", payload);
+  if (!res || res.ok === false) {
+    const { message_id, ...rest } = payload;
+    return await telegramCall(env, "sendMessage", rest);
+  }
+  return res;
+}
+
 async function downloadTelegramFile(fileId, env) {
   const metaRes = await fetch(
     `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`
@@ -745,6 +797,21 @@ function arrayBufferToBase64(buffer) {
 
 // ---------- Gemini ----------
 
+// A hung Gemini request (no response, no error) would otherwise block the
+// Worker's background execution indefinitely with nothing to catch — this
+// forces a real, catchable failure after GEMINI_TIMEOUT_MS.
+const GEMINI_TIMEOUT_MS = 20000;
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function geminiGenerate(parts, env) {
   const body = JSON.stringify({
     contents: [{ role: "user", parts }],
@@ -753,13 +820,25 @@ async function geminiGenerate(parts, env) {
 
   // Use "-latest" aliases only — Google retires dated model names quickly, aliases auto-track what's current.
   const models = ["gemini-flash-latest", "gemini-flash-lite-latest"];
-  let json, res;
+  let json, res, lastErr;
   outer: for (const model of models) {
     for (let attempt = 0; attempt < 2; attempt++) {
-      res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`,
-        { method: "POST", headers: { "Content-Type": "application/json" }, body }
-      );
+      try {
+        res = await fetchWithTimeout(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`,
+          { method: "POST", headers: { "Content-Type": "application/json" }, body },
+          GEMINI_TIMEOUT_MS
+        );
+      } catch (err) {
+        // Network error or our own timeout abort — treat as retryable, same as a 503.
+        lastErr = err;
+        console.error(`gemini fetch failed (model=${model}, attempt=${attempt})`, err.name, err.message);
+        res = null;
+        if (attempt === 0) {
+          continue;
+        }
+        break;
+      }
       json = await res.json();
       if (res.ok) break outer;
       console.error(`gemini error (model=${model}, attempt=${attempt})`, JSON.stringify(json));
@@ -771,17 +850,19 @@ async function geminiGenerate(parts, env) {
     }
   }
 
-  if (!res.ok) {
-    await logError("geminiGenerate exhausted all models", new Error(JSON.stringify(json)), env);
+  if (!res || !res.ok) {
+    await logError("geminiGenerate exhausted all models", lastErr || new Error(JSON.stringify(json)), env);
     throw new Error("gemini request failed");
   }
   return json.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
 }
 
-async function classifyWithGemini(source, env) {
+export async function classifyWithGemini(source, env) {
   const today = todayInTehran();
+  const todayWeekday = WEEKDAY_FA[new Date(today + "T00:00:00Z").getUTCDay()];
+  const wb = iranianWeekBounds(today);
   const instructions = `You are an inbox triage assistant. The user sends a quick voice note or text — often casual/colloquial spoken language — with one or more thoughts, tasks, ideas, or things someone told them.
-Today's date is ${today} (Asia/Tehran, Iran).
+Today's date is ${today} (Asia/Tehran, Iran), which is a ${todayWeekday}.
 
 Return ONLY a JSON object (no markdown fences) with exactly this shape:
 {
@@ -798,7 +879,10 @@ Return ONLY a JSON object (no markdown fences) with exactly this shape:
 
 Splitting guide:
 - Default to ONE item for the whole input.
-- Only split into multiple items when the input clearly contains two or more distinct, independent action items that don't belong together (e.g. several unrelated things to remember or do, possibly about different people/deadlines).
+- Split into multiple items whenever the input names two or more separately actionable things, even if they share the same day, are mentioned in one breath, or are joined by "and"/"also"/"همچنین"/"و" — sharing a date or being spoken together is NOT a reason to merge them.
+- The strongest signal for a split is that the parts would naturally get DIFFERENT categories (e.g. one part is a Task/Follow-up and another is a Purchase/Reminder) or involve different people/subjects — in that case, always split.
+  Example that MUST split into 2 items: "فردا باید جلسه با مشتری رو ست کنم، همچنین واسه خونه آب معدنی بخرم" → item 1 (Task: setting up the meeting), item 2 (Purchase: buying water) — do not merge these just because both say "فردا".
+- Only keep ONE item when the input is really a single coherent action/thought, even if long.
 - Do not split a single idea/sentence just because it's long.
 
 Category guide:
@@ -811,6 +895,10 @@ Category guide:
 Date guide:
 - Resolve relative expressions ("today", "tomorrow", "Sunday", "in 3 days") against today's date above.
 - Convert Persian/Jalali calendar dates to Gregorian.
+- IMPORTANT — Iranian week convention (this is NOT the Western Monday-start week): the week runs Saturday (شنبه) through Friday (جمعه).
+  - "این هفته" (this week) = ${wb.thisStart} through ${wb.thisEnd}.
+  - "هفته دیگه" / "هفته بعد" / "هفته آینده" (next week) = ${wb.nextStart} through ${wb.nextEnd}.
+  - So e.g. "دوشنبه هفته دیگه" (Monday of next week) must fall inside ${wb.nextStart}..${wb.nextEnd}, not two weeks out.
 - If genuinely no date is mentioned for an item, use null.
 
 If audio is provided, transcribe it first (it is likely Persian/Farsi), then classify based on the transcript.`;
@@ -827,11 +915,12 @@ If audio is provided, transcribe it first (it is likely Persian/Farsi), then cla
   try {
     const obj = JSON.parse(text);
     items = Array.isArray(obj.items) ? obj.items : Array.isArray(obj) ? obj : [obj];
-  } catch {
-    items = [{ name: "Unclassified", category: "Idea", raw_text: text, clean_text: text, due_date: null }];
+  } catch (err) {
+    await logError("classifyWithGemini: unparseable response", new Error(text.slice(0, 500)), env);
+    throw new Error("gemini returned unparseable response");
   }
   if (items.length === 0) {
-    items = [{ name: "Unclassified", category: "Idea", raw_text: "", clean_text: "", due_date: null }];
+    throw new Error("gemini returned zero items");
   }
   for (const parsed of items) {
     if (!CATEGORIES.includes(parsed.category)) parsed.category = "Idea";
@@ -844,7 +933,10 @@ If audio is provided, transcribe it first (it is likely Persian/Farsi), then cla
 }
 
 async function resolveDateWithGemini(typedText, today, env) {
-  const instructions = `Today's date is ${today} (Asia/Tehran, Iran). The user typed a date or relative day expression, possibly in Persian, possibly a Jalali calendar date: "${typedText}".
+  const todayWeekday = WEEKDAY_FA[new Date(today + "T00:00:00Z").getUTCDay()];
+  const wb = iranianWeekBounds(today);
+  const instructions = `Today's date is ${today} (Asia/Tehran, Iran), which is a ${todayWeekday}. The user typed a date or relative day expression, possibly in Persian, possibly a Jalali calendar date: "${typedText}".
+Iranian week convention (NOT Western Monday-start): week runs Saturday through Friday. "این هفته" (this week) = ${wb.thisStart}..${wb.thisEnd}. "هفته دیگه/بعد" (next week) = ${wb.nextStart}..${wb.nextEnd}.
 Resolve it to an absolute Gregorian ISO date. Return ONLY a JSON object (no markdown fences): {"date": "YYYY-MM-DD"} or {"date": null} if it cannot be resolved as a date.`;
   const text = await geminiGenerate([{ text: instructions }], env);
   try {
@@ -895,7 +987,7 @@ function buildContentProperties(parsed) {
   return properties;
 }
 
-async function notionCreatePageFull(chatId, parsed, env) {
+export async function notionCreatePageFull(chatId, parsed, env) {
   const properties = {
     ...buildContentProperties(parsed),
     Status: { select: { name: DEFAULT_STATUS } },
@@ -1006,8 +1098,10 @@ export async function notionQueryByCategoryAndDate(category, rangeCode, chatId, 
       filters.push({ property: "Due Date", date: { on_or_after: today } });
       filters.push({ property: "Due Date", date: { on_or_before: addDays(today, 1) } });
     } else if (rangeCode === "W") {
+      // Rest of the Iranian week (Sat..Fri), not a rolling 7-day window.
+      const wb = iranianWeekBounds(today);
       filters.push({ property: "Due Date", date: { on_or_after: today } });
-      filters.push({ property: "Due Date", date: { on_or_before: addDays(today, 6) } });
+      filters.push({ property: "Due Date", date: { on_or_before: wb.thisEnd } });
     }
   }
 
