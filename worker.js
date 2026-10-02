@@ -1362,12 +1362,13 @@ async function notionQueryDigestUsers(hour, env) {
   return json.results;
 }
 
-function formatDigestText(items) {
+function formatDigestText(items, dateIso) {
+  const dateLine = `خلاصه امروز، مورخ ${formatPersianDate(dateIso)}`;
   if (items.length === 0) {
-    return "☀️ صبح بخیر! امروز هیچ کار زمان‌داری نداری — یه روز آرومه 🙂";
+    return `☀️ ${dateLine}\n\nهیچ کار زمان‌داری نداری — یه روز آرومه 🙂`;
   }
-  const lines = items.map((it) => `• ${CATEGORY_EMOJI[it.category] || "📌"} ${it.name}`);
-  return `☀️ خلاصه امروزت (${items.length} مورد):\n${lines.join("\n")}`;
+  const lines = items.map((it) => `• ${CATEGORY_LABEL_FA[it.category] || it.category}: ${it.name}`);
+  return `☀️ ${dateLine} (${items.length} مورد):\n${lines.join("\n")}`;
 }
 
 // wrangler.toml's cron trigger fires at fixed UTC times picked to match
@@ -1382,10 +1383,11 @@ async function runDailyDigest(event, env) {
     const chatId = user.properties?.ChatId?.number;
     if (!chatId) continue;
     try {
+      const today = todayInTehran();
       const items = (await notionQueryByCategoryAndDate(null, "T", chatId, env)).filter(
         (it) => it.status !== "done" && it.status !== "skipped"
       );
-      await telegramCall(env, "sendMessage", { chat_id: chatId, text: formatDigestText(items) });
+      await telegramCall(env, "sendMessage", { chat_id: chatId, text: formatDigestText(items, today) });
     } catch (err) {
       await logError(`runDailyDigest chatId=${chatId}`, err, env, chatId);
     }
