@@ -1367,7 +1367,9 @@ function formatDigestText(items, dateIso) {
   if (items.length === 0) {
     return `☀️ ${dateLine}\n\nهیچ کار زمان‌داری نداری — یه روز آرومه 🙂`;
   }
-  const lines = items.map((it) => `• ${CATEGORY_LABEL_FA[it.category] || it.category}: ${it.name}`);
+  const lines = items.map(
+    (it) => `${CATEGORY_EMOJI[it.category] || "📌"} ${CATEGORY_LABEL_FA[it.category] || it.category}: ${it.name}`
+  );
   return `☀️ ${dateLine} (${items.length} مورد):\n${lines.join("\n")}`;
 }
 
