@@ -467,9 +467,17 @@ async function handleCallback(cq, env) {
       text: `تاریخ رو بنویس (مثلاً «یکشنبه»، «فردا»، «1404/7/20» یا «2026-10-10») و روی همین پیام ریپلای کن.\n#ref:${rawId}`,
     });
   } else if (action === "edittext") {
+    const page = await notionGetPage(pageId, env);
+    const currentText = (page.properties["Clean Text"]?.rich_text?.map((t) => t.plain_text).join("") || "").trim();
     await telegramCall(env, "sendMessage", {
       chat_id: chatId,
-      text: `متن درست‌شده رو بنویس و روی همین پیام ریپلای کن — جایگزین متن فعلی میشه.\n#edittext:${rawId}`,
+      parse_mode: "HTML",
+      text:
+        (currentText ? `متن فعلی (روش ضربه بزن تا کپی بشه):\n<code>${escapeHtml(currentText)}</code>\n\n` : "") +
+        `حالا نسخه‌ی اصلاح‌شده رو بنویس و بفرست — جاش می‌شینه.\n#edittext:${rawId}`,
+      // force_reply opens the input already targeting this message, so the user
+      // doesn't need to manually long-press/tap "reply" before typing.
+      reply_markup: { force_reply: true, input_field_placeholder: "متن اصلاح‌شده رو بنویس..." },
     });
   } else if (action === "st") {
     await telegramCall(env, "editMessageReplyMarkup", {
@@ -537,6 +545,10 @@ function formatListHeader(category, rangeCode, count) {
   const rangeLabel = { T: "امروز", M: "فردا", TM: "امروز و فردا", W: "این هفته", A: "همه" }[rangeCode] || "";
   const header = `${title} — ${rangeLabel} (${count})`;
   return count === 0 ? `${header}\n\nچیزی پیدا نشد.` : header;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function formatItemText(it) {
