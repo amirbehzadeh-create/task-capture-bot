@@ -125,6 +125,13 @@ async function handleMessage(message, env) {
     return;
   }
 
+  // A reply to our "edit text" prompt carries a hidden #edittext:<pageId> tag.
+  const editTextRef = message.reply_to_message?.text?.match(/#edittext:([a-f0-9]{32})/);
+  if (editTextRef && message.text) {
+    await handleEditTextReply(chatId, editTextRef[1], message.text, env);
+    return;
+  }
+
   let transcriptSource; // { kind: 'audio', base64, mimeType } or { kind: 'text', text }
   let isVoice = false;
 
@@ -329,6 +336,23 @@ async function handleTypedDateReply(chatId, pageIdNoDash, typedText, env) {
   });
 }
 
+async function handleEditTextReply(chatId, pageIdNoDash, newText, env) {
+  const pageId = toDashedUuid(pageIdNoDash);
+  const trimmed = newText.trim();
+  if (!trimmed) {
+    await telegramCall(env, "sendMessage", { chat_id: chatId, text: "متن خالی بود، چیزی تغییر نکرد." });
+    return;
+  }
+  await notionUpdateContentText(pageId, trimmed, env);
+  const page = await notionGetPage(pageId, env);
+  const shortId = formatShortId(page);
+  await telegramCall(env, "sendMessage", {
+    chat_id: chatId,
+    text: `📝 متن #${shortId} به‌روزرسانی شد:\n\n${trimmed}`,
+    reply_markup: buildKeyboard(pageIdNoDash),
+  });
+}
+
 async function handleCallback(cq, env) {
   const chatId = cq.message.chat.id;
   const messageId = cq.message.message_id;
@@ -442,6 +466,11 @@ async function handleCallback(cq, env) {
       chat_id: chatId,
       text: `تاریخ رو بنویس (مثلاً «یکشنبه»، «فردا»، «1404/7/20» یا «2026-10-10») و روی همین پیام ریپلای کن.\n#ref:${rawId}`,
     });
+  } else if (action === "edittext") {
+    await telegramCall(env, "sendMessage", {
+      chat_id: chatId,
+      text: `متن درست‌شده رو بنویس و روی همین پیام ریپلای کن — جایگزین متن فعلی میشه.\n#edittext:${rawId}`,
+    });
   } else if (action === "st") {
     await telegramCall(env, "editMessageReplyMarkup", {
       chat_id: chatId,
@@ -546,6 +575,7 @@ function buildKeyboard(pageIdNoDash) {
         { text: "📅 تاریخ", callback_data: `date:${pageIdNoDash}` },
         { text: "🗑 حذف", callback_data: `del:${pageIdNoDash}` },
       ],
+      [{ text: "📝 ویرایش متن", callback_data: `edittext:${pageIdNoDash}` }],
       [{ text: "✅ بستن", callback_data: `ok:${pageIdNoDash}` }],
     ],
   };
@@ -901,7 +931,11 @@ Date guide:
   - So e.g. "دوشنبه هفته دیگه" (Monday of next week) must fall inside ${wb.nextStart}..${wb.nextEnd}, not two weeks out.
 - If genuinely no date is mentioned for an item, use null.
 
-If audio is provided, transcribe it first (it is likely Persian/Farsi), then classify based on the transcript.`;
+If audio is provided, transcribe it first (it is likely Iranian colloquial Persian/Farsi, possibly with background noise or a casual driving/walking tone), then classify based on the transcript.
+Transcription guide:
+- This is everyday spoken Persian, so expect common loanwords/informal terms used in Iran for errands and places, e.g. کارواش (car wash), سوپرمارکت, کافی‌شاپ, پارکینگ, آژانس, شارژ, اپلیکیشن, دکتر, قسط, فاکتور — transcribe these as the real word, not a phonetically-similar but nonsensical alternative.
+- If a word is unclear, prefer the most common, everyday reading that fits the sentence's meaning over a rare or nonsensical one.
+- Never invent content that was not said; if a short phrase is truly unintelligible, transcribe the surrounding words you are confident about and leave the unclear part out rather than guessing wildly.`;
 
   const parts = [{ text: instructions }];
   if (source.kind === "audio") {
@@ -1069,6 +1103,23 @@ export async function notionUpdateCategory(pageId, category, env) {
 
 export async function notionUpdateStatus(pageId, status, env) {
   await notionPatch(pageId, { properties: { Status: { select: { name: status } } } }, `notionUpdateStatus(${pageId})`, env);
+}
+
+// User-driven correction of a mis-transcribed/mis-heard item: overwrites the
+// title and the clean description with the user's own retyped text. Raw Text
+// is left untouched as a record of what Gemini originally heard.
+export async function notionUpdateContentText(pageId, newText, env) {
+  await notionPatch(
+    pageId,
+    {
+      properties: {
+        Name: { title: [{ text: { content: newText.slice(0, 2000) } }] },
+        "Clean Text": { rich_text: [{ text: { content: newText.slice(0, 2000) } }] },
+      },
+    },
+    `notionUpdateContentText(${pageId})`,
+    env
+  );
 }
 
 export async function notionUpdateDueDate(pageId, isoDateOrNull, env) {
