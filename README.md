@@ -34,6 +34,7 @@ All data lives in Notion, reachable from any Notion client independent of this b
 | **Bot Users** | Web-login credentials per Telegram chat id (ChatId, PasswordHash, Salt, DisplayName, DigestEnabled, DigestHour) |
 | **Bot Error Log** | Every caught error across the whole flow, for debugging without a live session |
 | **Bot Feedback** | Free-text feedback users send the creator (ChatId, DisplayName, Text) — kept separate from Task Inbox |
+| **Task Updates** | Progress notes/comments logged against a task (TaskId, ChatId, Text), independent of its Status |
 
 The Worker talks to Notion via a **Notion internal integration** named `TaskBotWorker`. Any new
 Notion database this project needs must be manually shared with that integration from Notion's UI
@@ -50,6 +51,7 @@ Set via `wrangler secret put <NAME>` from this folder (never stored in a file):
 - `NOTION_ERROR_DB_ID` — Bot Error Log database id
 - `NOTION_USERS_DB_ID` — Bot Users database id
 - `NOTION_FEEDBACK_DB_ID` — Bot Feedback database id
+- `NOTION_UPDATES_DB_ID` — Task Updates database id
 - `WEB_SESSION_SECRET` — random secret for signing web session cookies
 
 ## Deploying
@@ -111,11 +113,25 @@ curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://task-capture-bo
   e.g. when Gemini mis-transcribed a word from voice. Raw Text (the original transcript) is kept
   untouched as a record of what was actually heard.
 - 🗑 حذف — asks for a yes/no confirmation first; soft-deletes on confirm, with an "↩️ برگردون" undo.
+- 🗒 آپدیت‌ها — shows the last 5 progress notes and lets you add a new one (force_reply), stored in
+  the **Task Updates** database, independent of Status — a way to log what moved forward on a task
+  without changing its column.
 
 ## Web board
 
 `https://task-capture-bot.mytaskcapture.workers.dev` — log in with your Telegram chat id and the
 password the bot gave you. Each user only ever sees/edits their own tasks (enforced server-side,
-not just hidden in the UI). Supports creating new tasks from the browser too (typed text or a
-recorded voice note), drag-and-drop between status columns, click-to-edit, and filters by category
-and date range.
+not just hidden in the UI). Due dates are shown in Jalali (`دوشنبه 1405/07/13`), with an optional
+custom from/to date-range filter alongside the quick today/tomorrow/this-week ones.
+
+Creating a new task (typed text or a recorded voice note) is a two-step flow, mirroring the
+Telegram confirmation message: `POST /api/tasks/preview` classifies with Gemini and returns the
+proposed item(s) *without writing anything to Notion yet*; the UI shows an editable review card
+(title, category, due date, description) per item, and only on confirm does `POST /api/tasks`
+(now accepting a pre-built `items` array) actually create the Notion page(s). Every task card's
+edit modal also has a progress-updates timeline, backed by the **Task Updates** database, with an
+add box — separate from the drag-and-drop status column, so you can log what progressed without
+touching Status.
+
+Other board features: drag-and-drop between status columns, click-to-edit, and filters by
+category and date range.
