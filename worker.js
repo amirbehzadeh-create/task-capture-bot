@@ -147,6 +147,13 @@ async function handleMessage(message, env) {
     return;
   }
 
+  // A reply to our "updates" prompt carries a hidden #update:<pageId> tag.
+  const updateRef = message.reply_to_message?.text?.match(/#update:([a-f0-9]{32})/);
+  if (updateRef && message.text) {
+    await handleTaskUpdateReply(chatId, updateRef[1], message.text, env);
+    return;
+  }
+
   let transcriptSource; // { kind: 'audio', base64, mimeType } or { kind: 'text', text }
   let isVoice = false;
 
@@ -403,6 +410,25 @@ async function handleFeedbackReply(chatId, message, env) {
   }
 }
 
+async function handleTaskUpdateReply(chatId, pageIdNoDash, text, env) {
+  const pageId = toDashedUuid(pageIdNoDash);
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  try {
+    await notionCreateTaskUpdate(pageId, chatId, trimmed, env);
+    const page = await notionGetPage(pageId, env);
+    const shortId = formatShortId(page);
+    await telegramCall(env, "sendMessage", {
+      chat_id: chatId,
+      text: `✅ آپدیت برای #${shortId} ثبت شد:\n${trimmed}`,
+      reply_markup: buildKeyboard(pageIdNoDash),
+    });
+  } catch (err) {
+    await logError("handleTaskUpdateReply", err, env, chatId);
+    await telegramCall(env, "sendMessage", { chat_id: chatId, text: "⚠️ نشد ثبتش کنم، دوباره امتحان کن." });
+  }
+}
+
 async function handleCallback(cq, env) {
   const chatId = cq.message.chat.id;
   const messageId = cq.message.message_id;
@@ -529,6 +555,19 @@ async function handleCallback(cq, env) {
       // doesn't need to manually long-press/tap "reply" before typing.
       reply_markup: { force_reply: true, input_field_placeholder: "متن اصلاح‌شده رو بنویس..." },
     });
+  } else if (action === "updates") {
+    const updates = await notionQueryTaskUpdates(pageId, env);
+    const listText = updates.length
+      ? updates
+          .slice(0, 5)
+          .map((u) => `• ${formatPersianDate(u.created.slice(0, 10))}: ${u.text}`)
+          .join("\n")
+      : "هنوز آپدیتی ثبت نشده.";
+    await telegramCall(env, "sendMessage", {
+      chat_id: chatId,
+      text: `🗒 آپدیت‌های این تسک:\n\n${listText}\n\nیه آپدیت جدید بنویس و بفرست:\n#update:${rawId}`,
+      reply_markup: { force_reply: true, input_field_placeholder: "آپدیت جدید رو بنویس..." },
+    });
   } else if (action === "st") {
     await telegramCall(env, "editMessageReplyMarkup", {
       chat_id: chatId,
@@ -654,7 +693,10 @@ function buildKeyboard(pageIdNoDash) {
         { text: "📅 تاریخ", callback_data: `date:${pageIdNoDash}` },
         { text: "🗑 حذف", callback_data: `del:${pageIdNoDash}` },
       ],
-      [{ text: "📝 ویرایش متن", callback_data: `edittext:${pageIdNoDash}` }],
+      [
+        { text: "📝 ویرایش متن", callback_data: `edittext:${pageIdNoDash}` },
+        { text: "🗒 آپدیت‌ها", callback_data: `updates:${pageIdNoDash}` },
+      ],
       [{ text: "✅ بستن", callback_data: `ok:${pageIdNoDash}` }],
     ],
   };
@@ -1278,6 +1320,60 @@ export async function notionQueryByCategoryAndDate(category, rangeCode, chatId, 
     const shortId = formatShortId(page);
     return { id: page.id, name, cleanText, rawText, status, category: categoryName, dueDate, shortId };
   });
+}
+
+// ---------- Task Updates (progress notes on a task, independent of Status) ----------
+
+export async function notionCreateTaskUpdate(taskPageId, chatId, text, env) {
+  const res = await fetch("https://api.notion.com/v1/pages", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.NOTION_SECRET}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    },
+    body: JSON.stringify({
+      parent: { database_id: env.NOTION_UPDATES_DB_ID },
+      properties: {
+        Name: { title: [{ text: { content: text.slice(0, 100) } }] },
+        TaskId: { rich_text: [{ text: { content: taskPageId.replace(/-/g, "") } }] },
+        ChatId: { number: chatId },
+        Text: { rich_text: [{ text: { content: text.slice(0, 2000) } }] },
+      },
+    }),
+  });
+  const json = await res.json();
+  if (!res.ok) {
+    await logError("notionCreateTaskUpdate", new Error(JSON.stringify(json)), env, chatId);
+    throw new Error("notion create failed");
+  }
+  return json;
+}
+
+export async function notionQueryTaskUpdates(taskPageId, env) {
+  const res = await fetch(`https://api.notion.com/v1/databases/${env.NOTION_UPDATES_DB_ID}/query`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.NOTION_SECRET}`,
+      "Content-Type": "application/json",
+      "Notion-Version": "2022-06-28",
+    },
+    body: JSON.stringify({
+      filter: { property: "TaskId", rich_text: { equals: taskPageId.replace(/-/g, "") } },
+      sorts: [{ property: "Created", direction: "descending" }],
+      page_size: 50,
+    }),
+  });
+  const json = await res.json();
+  if (!res.ok) {
+    await logError("notionQueryTaskUpdates", new Error(JSON.stringify(json)), env);
+    return [];
+  }
+  return json.results.map((page) => ({
+    id: page.id,
+    text: page.properties.Text?.rich_text?.map((t) => t.plain_text).join("") || "",
+    created: page.properties.Created?.created_time || page.created_time,
+  }));
 }
 
 // ---------- Feedback (separate database, never mixed with the task inbox) ----------

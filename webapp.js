@@ -23,6 +23,8 @@ import {
   classifyWithGemini,
   notionCreatePageFull,
   formatShortId,
+  notionCreateTaskUpdate,
+  notionQueryTaskUpdates,
 } from "./worker.js";
 
 // ---------- crypto helpers ----------
@@ -244,7 +246,9 @@ export async function handleApi(request, url, env) {
     return json({ tasks });
   }
 
-  if (path === "/api/tasks" && request.method === "POST") {
+  // Classify only — no Notion write yet. Lets the web UI show a review/edit
+  // step (like Telegram's confirmation message) before anything is added.
+  if (path === "/api/tasks/preview" && request.method === "POST") {
     let body;
     try {
       body = await request.json();
@@ -259,8 +263,40 @@ export async function handleApi(request, url, env) {
     } else {
       return json({ error: "متن یا صدایی ارسال نشد" }, 400);
     }
-
     const items = await classifyWithGemini(source, env);
+    return json({ items });
+  }
+
+  if (path === "/api/tasks" && request.method === "POST") {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "bad request" }, 400);
+    }
+
+    let items;
+    if (Array.isArray(body.items) && body.items.length) {
+      // Pre-classified (and possibly user-edited) items from the review step.
+      items = body.items.map((it) => ({
+        name: String(it.name || "").slice(0, 200) || "Untitled",
+        category: CATEGORIES.includes(it.category) ? it.category : "Idea",
+        clean_text: String(it.clean_text || ""),
+        raw_text: String(it.raw_text || it.clean_text || ""),
+        due_date: it.due_date && /^\d{4}-\d{2}-\d{2}$/.test(it.due_date) ? it.due_date : null,
+      }));
+    } else {
+      let source;
+      if (body.audioBase64) {
+        source = { kind: "audio", base64: body.audioBase64, mimeType: body.mimeType || "audio/webm" };
+      } else if (body.text && body.text.trim()) {
+        source = { kind: "text", text: body.text.trim() };
+      } else {
+        return json({ error: "متن یا صدایی ارسال نشد" }, 400);
+      }
+      items = await classifyWithGemini(source, env);
+    }
+
     const created = [];
     for (const item of items) {
       const page = await notionCreatePageFull(chatId, item, env);
@@ -314,6 +350,32 @@ export async function handleApi(request, url, env) {
 
     if (request.method === "DELETE") {
       await notionSoftDelete(pageId, env);
+      return json({ ok: true });
+    }
+  }
+
+  const updatesMatch = path.match(/^\/api\/tasks\/([a-f0-9]{32})\/updates$/);
+  if (updatesMatch) {
+    const pageId = toDashedUuid(updatesMatch[1]);
+    const page = await notionGetPage(pageId, env);
+    const ownerChatId = page.properties.ChatId?.number;
+    if (ownerChatId !== chatId) return json({ error: "forbidden" }, 403);
+
+    if (request.method === "GET") {
+      const updates = await notionQueryTaskUpdates(pageId, env);
+      return json({ updates });
+    }
+
+    if (request.method === "POST") {
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "bad request" }, 400);
+      }
+      const text = String(body.text || "").trim();
+      if (!text) return json({ error: "empty" }, 400);
+      await notionCreateTaskUpdate(pageId, chatId, text, env);
       return json({ ok: true });
     }
   }
@@ -440,6 +502,15 @@ export function renderAppHtml() {
   }
   .modal h2 { font-size: 16px; margin: 0 0 18px; }
   .modal-actions { display: flex; justify-content: space-between; margin-top: 20px; gap: 8px; }
+  .updates-list { max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+  .updates-empty { color: var(--text-muted); font-size: 12px; padding: 6px 0; }
+  .update-row { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
+  .update-date { font-size: 11px; color: var(--text-muted); margin-bottom: 2px; }
+  .update-text { font-size: 13px; white-space: pre-wrap; }
+  .updates-add { display: flex; gap: 8px; align-items: flex-start; }
+  .updates-add textarea { flex: 1; }
+  .review-item { border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 12px; background: var(--bg); }
+  .review-item .field:last-child { margin-bottom: 0; }
   .hidden { display: none !important; }
   .empty-msg { color: var(--text-muted); font-size: 13px; padding: 20px 8px; text-align: center; }
 </style>
@@ -481,18 +552,30 @@ export function renderAppHtml() {
 <div class="modal-overlay hidden" id="new-task-overlay">
   <div class="modal">
     <h2>➕ تسک جدید</h2>
-    <div class="field">
-      <label>متن</label>
-      <textarea id="nt-text" rows="4" placeholder="مثلاً: فردا باید با مسعود تماس بگیرم..."></textarea>
+
+    <div id="nt-compose">
+      <div class="field">
+        <label>متن</label>
+        <textarea id="nt-text" rows="4" placeholder="مثلاً: فردا باید با مسعود تماس بگیرم..."></textarea>
+      </div>
+      <div class="field" style="text-align:center;">
+        <button class="btn btn-ghost" id="nt-record">🎙 ضبط صدا</button>
+        <div id="nt-record-status" style="font-size:12px; color:var(--text-muted); margin-top:6px;"></div>
+      </div>
+      <div class="error-msg" id="nt-error"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="nt-cancel">انصراف</button>
+        <button class="btn btn-primary" id="nt-preview">پیش‌نمایش</button>
+      </div>
     </div>
-    <div class="field" style="text-align:center;">
-      <button class="btn btn-ghost" id="nt-record">🎙 ضبط صدا</button>
-      <div id="nt-record-status" style="font-size:12px; color:var(--text-muted); margin-top:6px;"></div>
-    </div>
-    <div class="error-msg" id="nt-error"></div>
-    <div class="modal-actions">
-      <button class="btn btn-ghost" id="nt-cancel">انصراف</button>
-      <button class="btn btn-primary" id="nt-submit">ثبت</button>
+
+    <div id="nt-review" class="hidden">
+      <div id="nt-review-items"></div>
+      <div class="error-msg" id="nt-review-error"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="nt-back">⬅ بازگشت</button>
+        <button class="btn btn-primary" id="nt-confirm">➕ افزودن به لیست</button>
+      </div>
     </div>
   </div>
 </div>
@@ -523,6 +606,14 @@ export function renderAppHtml() {
     <div class="field">
       <label>متن اصلی (فقط نمایش)</label>
       <textarea id="m-raw" rows="3" readonly style="background:#f7f7fa;color:#888;"></textarea>
+    </div>
+    <div class="field">
+      <label>آپدیت‌های پیشرفت</label>
+      <div id="m-updates-list" class="updates-list"></div>
+      <div class="updates-add">
+        <textarea id="m-update-text" rows="2" placeholder="یه آپدیت جدید بنویس..."></textarea>
+        <button class="btn btn-ghost" id="m-update-add" type="button">➕ افزودن</button>
+      </div>
     </div>
     <div class="modal-actions">
       <button class="btn btn-danger" id="m-delete">🗑 حذف</button>
@@ -872,12 +963,48 @@ function openModal(taskId) {
   });
 
   document.getElementById("modal-overlay").classList.remove("hidden");
+  loadTaskUpdates(taskId);
 }
 
 function closeModal() {
   document.getElementById("modal-overlay").classList.add("hidden");
   editingTaskId = null;
 }
+
+async function loadTaskUpdates(taskId) {
+  const listEl = document.getElementById("m-updates-list");
+  listEl.innerHTML = '<div class="updates-empty">در حال بارگذاری...</div>';
+  const res = await api("/api/tasks/" + taskId + "/updates");
+  const data = await res.json();
+  renderTaskUpdates(data.updates || []);
+}
+
+function renderTaskUpdates(updates) {
+  const listEl = document.getElementById("m-updates-list");
+  if (!updates.length) {
+    listEl.innerHTML = '<div class="updates-empty">هنوز آپدیتی ثبت نشده.</div>';
+    return;
+  }
+  listEl.innerHTML = "";
+  updates.forEach((u) => {
+    const row = document.createElement("div");
+    row.className = "update-row";
+    const when = u.created ? formatPersianDate(u.created.slice(0, 10)) : "";
+    row.innerHTML =
+      '<div class="update-date">' + when + '</div><div class="update-text">' + escapeHtml(u.text) + "</div>";
+    listEl.appendChild(row);
+  });
+}
+
+document.getElementById("m-update-add").addEventListener("click", async () => {
+  if (!editingTaskId) return;
+  const textEl = document.getElementById("m-update-text");
+  const text = textEl.value.trim();
+  if (!text) return;
+  await api("/api/tasks/" + editingTaskId + "/updates", { method: "POST", body: JSON.stringify({ text }) });
+  textEl.value = "";
+  await loadTaskUpdates(editingTaskId);
+});
 
 document.getElementById("m-cancel").addEventListener("click", closeModal);
 document.getElementById("modal-overlay").addEventListener("click", (e) => {
@@ -911,12 +1038,17 @@ let mediaRecorder = null;
 let recordedChunks = [];
 let recordedBlob = null;
 
+let previewItems = [];
+
 function openNewTaskModal() {
   document.getElementById("nt-text").value = "";
   document.getElementById("nt-error").textContent = "";
   document.getElementById("nt-record-status").textContent = "";
   recordedBlob = null;
+  previewItems = [];
   document.getElementById("nt-record").textContent = "🎙 ضبط صدا";
+  document.getElementById("nt-compose").classList.remove("hidden");
+  document.getElementById("nt-review").classList.add("hidden");
   document.getElementById("new-task-overlay").classList.remove("hidden");
 }
 function closeNewTaskModal() {
@@ -965,16 +1097,16 @@ function blobToBase64(blob) {
   });
 }
 
-document.getElementById("nt-submit").addEventListener("click", async () => {
+document.getElementById("nt-preview").addEventListener("click", async () => {
   const errEl = document.getElementById("nt-error");
   errEl.textContent = "";
   const text = document.getElementById("nt-text").value.trim();
-  const submitBtn = document.getElementById("nt-submit");
+  const btn = document.getElementById("nt-preview");
 
   if (!text && !recordedBlob) { errEl.textContent = "یا متن بنویس یا صدا ضبط کن."; return; }
 
-  submitBtn.disabled = true;
-  submitBtn.textContent = "در حال پردازش...";
+  btn.disabled = true;
+  btn.textContent = "در حال پردازش...";
   try {
     let body;
     if (recordedBlob) {
@@ -983,7 +1115,64 @@ document.getElementById("nt-submit").addEventListener("click", async () => {
     } else {
       body = { text };
     }
-    const res = await api("/api/tasks", { method: "POST", body: JSON.stringify(body) });
+    const res = await api("/api/tasks/preview", { method: "POST", body: JSON.stringify(body) });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      errEl.textContent = data.error || "پردازش نشد، دوباره امتحان کن.";
+      return;
+    }
+    const data = await res.json();
+    previewItems = data.items || [];
+    renderReviewItems();
+    document.getElementById("nt-compose").classList.add("hidden");
+    document.getElementById("nt-review").classList.remove("hidden");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "پیش‌نمایش";
+  }
+});
+
+function renderReviewItems() {
+  const el = document.getElementById("nt-review-items");
+  el.innerHTML = "";
+  previewItems.forEach((item, idx) => {
+    const card = document.createElement("div");
+    card.className = "review-item";
+    card.innerHTML =
+      '<div class="field"><label>عنوان</label><input class="ri-name" data-idx="' + idx + '" value="' + escapeHtml(item.name || "") + '"></div>' +
+      '<div class="field"><label>دسته</label><select class="ri-category" data-idx="' + idx + '"></select></div>' +
+      '<div class="field"><label>تاریخ سررسید</label><input class="ri-date" type="date" data-idx="' + idx + '" value="' + (item.due_date || "") + '"></div>' +
+      '<div class="field"><label>توضیح</label><textarea class="ri-clean" rows="3" data-idx="' + idx + '">' + escapeHtml(item.clean_text || "") + "</textarea></div>";
+    el.appendChild(card);
+    const catSel = card.querySelector(".ri-category");
+    META.categories.forEach((c) => {
+      const opt = document.createElement("option");
+      opt.value = c.value; opt.textContent = c.emoji + " " + c.label;
+      if (c.value === item.category) opt.selected = true;
+      catSel.appendChild(opt);
+    });
+  });
+}
+
+document.getElementById("nt-back").addEventListener("click", () => {
+  document.getElementById("nt-review").classList.add("hidden");
+  document.getElementById("nt-compose").classList.remove("hidden");
+});
+
+document.getElementById("nt-confirm").addEventListener("click", async () => {
+  const errEl = document.getElementById("nt-review-error");
+  errEl.textContent = "";
+  const btn = document.getElementById("nt-confirm");
+
+  document.querySelectorAll(".ri-name").forEach((inp) => { previewItems[inp.dataset.idx].name = inp.value; });
+  document.querySelectorAll(".ri-category").forEach((sel) => { previewItems[sel.dataset.idx].category = sel.value; });
+  document.querySelectorAll(".ri-date").forEach((inp) => { previewItems[inp.dataset.idx].due_date = inp.value || null; });
+  document.querySelectorAll(".ri-clean").forEach((ta) => { previewItems[ta.dataset.idx].clean_text = ta.value; });
+
+  btn.disabled = true;
+  btn.textContent = "در حال ثبت...";
+  try {
+    const res = await api("/api/tasks", { method: "POST", body: JSON.stringify({ items: previewItems }) });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       errEl.textContent = data.error || "ثبت نشد، دوباره امتحان کن.";
@@ -992,8 +1181,8 @@ document.getElementById("nt-submit").addEventListener("click", async () => {
     closeNewTaskModal();
     await loadTasks();
   } finally {
-    submitBtn.disabled = false;
-    submitBtn.textContent = "ثبت";
+    btn.disabled = false;
+    btn.textContent = "➕ افزودن به لیست";
   }
 });
 
