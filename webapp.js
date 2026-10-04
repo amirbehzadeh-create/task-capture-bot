@@ -484,12 +484,14 @@ export function renderAppHtml() {
   }
   .card:active { cursor: grabbing; }
   .card.dragging { opacity: 0.4; }
+  .card.overdue { border-color: #dc2626; background: #fef2f2; }
   .card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
   .card-id { font-size: 11px; color: var(--text-muted); }
   .card-cat { font-size: 11px; background: #f1f2f8; border-radius: 6px; padding: 2px 6px; }
   .card-title { font-size: 14px; font-weight: 500; margin-bottom: 4px; line-height: 1.5; }
   .card-date { font-size: 11px; color: var(--text-muted); }
   .card-date.soon { color: #b45309; font-weight: 600; }
+  .card-date.overdue { color: #dc2626; font-weight: 700; }
 
   /* ---- Modal ---- */
   .modal-overlay {
@@ -709,7 +711,7 @@ function renderFilters() {
     el.appendChild(chip);
   });
   const select = document.createElement("select");
-  [["A", "همه تاریخ‌ها"], ["T", "امروز"], ["M", "فردا"], ["W", "این هفته"], ["RANGE", "بازه دلخواه..."], ["NONE", "بدون تاریخ"]].forEach(([v, label]) => {
+  [["A", "همه تاریخ‌ها"], ["T", "امروز"], ["M", "فردا"], ["W", "این هفته"], ["OVERDUE", "🔴 عقب‌افتاده‌ها"], ["RANGE", "بازه دلخواه..."], ["NONE", "بدون تاریخ"]].forEach(([v, label]) => {
     const opt = document.createElement("option");
     opt.value = v; opt.textContent = label;
     if (v === activeDateFilter) opt.selected = true;
@@ -840,6 +842,7 @@ function passesDateFilter(task) {
   if (activeDateFilter === "T") return task.dueDate === today;
   if (activeDateFilter === "M") return task.dueDate === addDaysIso(today, 1);
   if (activeDateFilter === "W") return task.dueDate >= today && task.dueDate <= iranianWeekEnd(today);
+  if (activeDateFilter === "OVERDUE") return isOverdueTask(task, today);
   if (activeDateFilter === "RANGE") {
     if (customDateFrom && task.dueDate < customDateFrom) return false;
     if (customDateTo && task.dueDate > customDateTo) return false;
@@ -899,18 +902,24 @@ function categoryMeta(value) {
   return (META.categories.find((c) => c.value === value)) || { emoji: "📌", label: value };
 }
 
+function isOverdueTask(t, today) {
+  return !!t.dueDate && t.dueDate < today && t.status !== "done" && t.status !== "skipped";
+}
+
 function renderCard(t) {
   const card = document.createElement("div");
-  card.className = "card";
+  const today = todayIso();
+  const overdue = isOverdueTask(t, today);
+  card.className = "card" + (overdue ? " overdue" : "");
   card.draggable = true;
   card.dataset.id = t.id;
 
   const cat = categoryMeta(t.category);
-  const today = todayIso();
   let dateHtml = "";
   if (t.dueDate) {
     const soon = t.dueDate === today || t.dueDate === addDaysIso(today, 1);
-    dateHtml = '<div class="card-date' + (soon ? " soon" : "") + '">📅 ' + formatPersianDate(t.dueDate) + "</div>";
+    const cls = overdue ? " overdue" : soon ? " soon" : "";
+    dateHtml = '<div class="card-date' + cls + '">📅 ' + formatPersianDate(t.dueDate) + "</div>";
   }
 
   card.innerHTML =
