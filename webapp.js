@@ -462,6 +462,7 @@ export function renderAppHtml() {
     font-size: 13px; cursor: pointer; user-select: none; color: var(--text-muted);
   }
   .chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .overdue-chip.active { background: #dc2626; border-color: #dc2626; color: #fff; }
   .filters select {
     padding: 6px 10px; border-radius: 999px; border: 1px solid var(--border); font-family: inherit; font-size: 13px;
   }
@@ -634,6 +635,7 @@ let activeCategoryFilter = new Set();
 let activeDateFilter = "A";
 let customDateFrom = "";
 let customDateTo = "";
+let overdueOnly = false;
 let editingTaskId = null;
 
 async function api(path, opts) {
@@ -711,7 +713,7 @@ function renderFilters() {
     el.appendChild(chip);
   });
   const select = document.createElement("select");
-  [["A", "همه تاریخ‌ها"], ["T", "امروز"], ["M", "فردا"], ["W", "این هفته"], ["OVERDUE", "🔴 عقب‌افتاده‌ها"], ["RANGE", "بازه دلخواه..."], ["NONE", "بدون تاریخ"]].forEach(([v, label]) => {
+  [["A", "همه تاریخ‌ها"], ["T", "امروز"], ["M", "فردا"], ["W", "این هفته"], ["RANGE", "بازه دلخواه..."], ["NONE", "بدون تاریخ"]].forEach(([v, label]) => {
     const opt = document.createElement("option");
     opt.value = v; opt.textContent = label;
     if (v === activeDateFilter) opt.selected = true;
@@ -742,6 +744,16 @@ function renderFilters() {
     wrap.appendChild(toInput);
     el.appendChild(wrap);
   }
+
+  const overdueChip = document.createElement("div");
+  overdueChip.className = "chip overdue-chip" + (overdueOnly ? " active" : "");
+  overdueChip.textContent = "🔴 عقب‌افتاده‌ها";
+  overdueChip.onclick = () => {
+    overdueOnly = !overdueOnly;
+    renderFilters();
+    renderBoard();
+  };
+  el.appendChild(overdueChip);
 }
 
 function todayIso() {
@@ -842,7 +854,6 @@ function passesDateFilter(task) {
   if (activeDateFilter === "T") return task.dueDate === today;
   if (activeDateFilter === "M") return task.dueDate === addDaysIso(today, 1);
   if (activeDateFilter === "W") return task.dueDate >= today && task.dueDate <= iranianWeekEnd(today);
-  if (activeDateFilter === "OVERDUE") return isOverdueTask(task, today);
   if (activeDateFilter === "RANGE") {
     if (customDateFrom && task.dueDate < customDateFrom) return false;
     if (customDateTo && task.dueDate > customDateTo) return false;
@@ -854,7 +865,10 @@ function passesDateFilter(task) {
 function renderBoard() {
   const board = document.getElementById("board");
   board.innerHTML = "";
-  const visible = TASKS.filter((t) => activeCategoryFilter.has(t.category) && passesDateFilter(t));
+  const today = todayIso();
+  const visible = TASKS.filter(
+    (t) => activeCategoryFilter.has(t.category) && passesDateFilter(t) && (!overdueOnly || isOverdueTask(t, today))
+  );
 
   META.statuses.forEach((s) => {
     const col = document.createElement("div");
