@@ -3,6 +3,11 @@
 Voice/text-to-task capture over Telegram, plus a small web Kanban board — built as a single
 Cloudflare Worker with no local server, no database of its own (Notion is the store).
 
+> **Setting this up from scratch for yourself (or with an AI agent's help)?** See
+> [`AGENT_SETUP_PROMPT.md`](AGENT_SETUP_PROMPT.md) — a complete, self-contained
+> walkthrough (accounts needed, Notion schemas, secrets, deploy, verification) meant
+> to be handed directly to an AI coding agent.
+
 ## Architecture
 
 ```
