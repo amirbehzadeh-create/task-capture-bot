@@ -1469,12 +1469,17 @@ function formatDigestText(items, dateIso) {
   return `☀️ ${dateLine} (${items.length} مورد):\n${lines.join("\n")}`;
 }
 
-// wrangler.toml's cron trigger fires at fixed UTC times picked to match
-// 8/9/10 AM Tehran (Iran dropped DST, so the UTC+3:30 offset never shifts).
-const DIGEST_CRON_HOUR = { "30 4 * * *": 8, "30 5 * * *": 9, "30 6 * * *": 10 };
+// wrangler.toml declares ONE combined cron ("30 4,5,6 * * *") rather than three
+// separate trigger entries — Cloudflare's free plan caps an account at 5 cron
+// triggers total, shared across every Worker on it, so each Worker should use
+// as few trigger entries as it can. The fixed UTC hours match 8/9/10 AM Tehran
+// (Iran dropped DST, so the UTC+3:30 offset never shifts); event.cron reports
+// the trigger's own configured string, not which hour actually fired, so the
+// real hour comes from event.scheduledTime instead.
+const DIGEST_UTC_HOUR_TO_TEHRAN_HOUR = { 4: 8, 5: 9, 6: 10 };
 
 async function runDailyDigest(event, env) {
-  const hour = DIGEST_CRON_HOUR[event.cron];
+  const hour = DIGEST_UTC_HOUR_TO_TEHRAN_HOUR[new Date(event.scheduledTime).getUTCHours()];
   if (!hour) return;
   const users = await notionQueryDigestUsers(hour, env);
   for (const user of users) {
